@@ -1,4 +1,4 @@
-# Submersible ESP32-C3 Data Logger
+# Brain Ballast Rock
 
 A low-power, deep-sleep enabled data logging node built around the Seeed Studio XIAO ESP32C3. This device remains in deep sleep to conserve power, waking periodically to listen for a LoRa trigger from the surface. Once triggered (or if a specific pressure threshold is met), it performs high-speed (50Hz) burst recording of pressure, temperature, and 3-axis acceleration to a MicroSD card, followed by chunked data transmission over LoRa.
 
