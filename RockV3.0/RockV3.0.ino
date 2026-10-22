@@ -7,6 +7,7 @@
 #include <esp_sleep.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_ADXL345_U.h>
+#include <math.h>
 
 // Pin Definitions
 #define LORA_CS    D3  
@@ -16,8 +17,21 @@
 
 #define RF95_FREQ 915.0
 
-// Instantiate modules
-RH_RF95 rf95(LORA_CS, LORA_INT);
+// 1. Subclass RadioHead to bypass the ESP32 ISR crash
+class RH_RF95_Poll : public RH_RF95 {
+public:
+  RH_RF95_Poll(uint8_t slaveSelectPin, uint8_t interruptPin) 
+    : RH_RF95(slaveSelectPin, interruptPin) {}
+  
+  // Expose the protected interrupt handler so we can call it safely from the main thread
+  void pollInterrupt() {
+    this->handleInterrupt();
+  }
+};
+
+// 2. Instantiate LoRa with 255 to PREVENT it from attaching a hardware interrupt
+RH_RF95_Poll rf95(LORA_CS, 255); 
+
 MS5837 sensor;
 Adafruit_ADXL345_Unified accel = Adafruit_ADXL345_Unified(12345);
 
@@ -32,17 +46,28 @@ RTC_DATA_ATTR float PRESSURE_THRESHOLD = 20.0;
 // Constants
 const uint16_t LORA_LISTEN_WINDOW_MS = 500;
 
+// 3. Helper to wait for TX without blocking the thread blindly
+void waitLoRaTx() {
+  while (rf95.mode() == RHGenericDriver::RHModeTx) {
+    if (digitalRead(LORA_INT) == HIGH) {
+      rf95.pollInterrupt();
+    }
+    delay(1);
+  }
+}
+
 void setup() {
   bool lora_initialized = false;
 
-  // Remap SPI bus to not use D9 (Bootload pin)
   SPI.begin(D8, D7, D10, -1);
   
-  // 1. Setup CS pins immediately to keep SPI devices quiet
   pinMode(LORA_CS, OUTPUT);
   digitalWrite(LORA_CS, HIGH);
   pinMode(SD_CS, OUTPUT);
   digitalWrite(SD_CS, HIGH);
+  
+  // Explicitly set the interrupt pin as input since RadioHead won't do it for pin 255
+  pinMode(LORA_INT, INPUT);
   
   Serial.begin(115200);
   delay(1000);
@@ -54,7 +79,6 @@ void setup() {
 
   if(boots_left > 0) {
     if(threshold_mode) { 
-      // 2. Initialize ONLY the I2C Bus and the Sensor
       Wire.begin();
       if (!sensor.begin(0)) {
         Serial.println("MS5837 initialization failed!");
@@ -80,7 +104,6 @@ void setup() {
       wake = true; 
     }
   } else {
-    // 2. Wake and Initialize LoRa FIRST to listen for surface signal
     pinMode(LORA_RST, OUTPUT);
     digitalWrite(LORA_RST, LOW); delay(10);
     digitalWrite(LORA_RST, HIGH); delay(10);
@@ -89,55 +112,60 @@ void setup() {
       Serial.println("LoRa init failed. Going to sleep.");
       goToSleep();
     }
-    lora_initialized = true; // Mark as initialized
+    lora_initialized = true; 
     
     rf95.setFrequency(RF95_FREQ);
     rf95.setTxPower(20, false);
     
     Serial.println("Listening for surface trigger...");
     
-    // 3. THE DECISION: Wait up to LORA_LISTEN_WINDOW_MS for a packet
-    if (rf95.waitAvailableTimeout(LORA_LISTEN_WINDOW_MS)) {
-      uint8_t buf[RH_RF95_MAX_MESSAGE_LEN];
-      uint8_t len = sizeof(buf) - 1; 
-      
-      if (rf95.recv(buf, &len)) {
-        buf[len] = '\0'; 
-        Serial.print("Signal received from surface: ");
-        Serial.println((char*)buf);
-        wake = true;
-
-        // Parse variables
-        int p_boots, p_mode;
-        unsigned long long p_sleep;
-        float p_thresh;
-        
-        if (sscanf((char*)buf, "%d,%llu,%f,%d", &p_boots, &p_sleep, &p_thresh, &p_mode) == 4) {
-          boots_left = p_boots;
-          SLEEP_DURATION_SECONDS = p_sleep;
-          PRESSURE_THRESHOLD = p_thresh;
-          threshold_mode = (p_mode > 0); 
-          
-          Serial.println("--- RTC Configuration Updated ---");
-          Serial.printf("Boots Left: %d\n", boots_left);
-          Serial.printf("Sleep Duration: %llu seconds\n", SLEEP_DURATION_SECONDS);
-          Serial.printf("Threshold: %.2f\n", PRESSURE_THRESHOLD);
-          Serial.printf("Mode: %s\n", threshold_mode ? "Threshold" : "Standard");
-        } else {
-          Serial.println("Standard wake signal (No config parameters parsed).");
-        }
-
-        // Put LoRa to sleep to save power
-        rf95.sleep();
+    // 4. Polling listen loop replaces the crashing hardware interrupt
+    unsigned long start_listen = millis();
+    while (millis() - start_listen < LORA_LISTEN_WINDOW_MS) {
+      if (digitalRead(LORA_INT) == HIGH) {
+        rf95.pollInterrupt(); // Safely process the SPI read in the main thread
       }
+      
+      if (rf95.available()) {
+        uint8_t buf[RH_RF95_MAX_MESSAGE_LEN];
+        uint8_t len = sizeof(buf) - 1; 
+        
+        if (rf95.recv(buf, &len)) {
+          buf[len] = '\0'; 
+          Serial.print("Signal received from surface: ");
+          Serial.println((char*)buf);
+          wake = true;
+
+          int p_boots, p_mode;
+          unsigned long long p_sleep;
+          float p_thresh;
+          
+          if (sscanf((char*)buf, "%d,%llu,%f,%d", &p_boots, &p_sleep, &p_thresh, &p_mode) == 4) {
+            boots_left = p_boots;
+            SLEEP_DURATION_SECONDS = p_sleep;
+            PRESSURE_THRESHOLD = p_thresh;
+            threshold_mode = (p_mode > 0); 
+            
+            Serial.println("--- RTC Configuration Updated ---");
+            Serial.printf("Boots Left: %d\n", boots_left);
+            Serial.printf("Sleep Duration: %llu seconds\n", SLEEP_DURATION_SECONDS);
+            Serial.printf("Threshold: %.2f\n", PRESSURE_THRESHOLD);
+            Serial.printf("Mode: %s\n", threshold_mode ? "Threshold" : "Standard");
+          } else {
+            Serial.println("Standard wake signal (No config parameters parsed).");
+          }
+
+          rf95.sleep();
+          break; 
+        }
+      }
+      delay(1); // Small yield to prevent watchdog timeout
     }
   }
 
-  // 4. If triggered, proceed to record and transmit
   if (wake) {
     Serial.println("Trigger confirmed! Initializing Sensors...");
 
-    // Initialize LoRa if it wasn't already initialized during the surface listen phase
     if (!lora_initialized) {
       pinMode(LORA_RST, OUTPUT);
       digitalWrite(LORA_RST, LOW); delay(10);
@@ -164,7 +192,6 @@ void setup() {
       accel.setRange(ADXL345_RANGE_16_G);
     }
     
-    // --- PHASE 1: HIGH-SPEED SD CARD LOGGING & PACKET FORMATTING ---
     if (SD.begin(SD_CS)) {
       File dataFile = SD.open("/burst_log.txt", FILE_WRITE); 
       
@@ -174,37 +201,42 @@ void setup() {
         
         int packetNum = 0;
         char payload[250] = ""; 
-        char lineBuffer[64]; 
+        char lineBuffer[80]; 
         
-        // Initialize the first payload string
         snprintf(payload, sizeof(payload), "%i|\n", packetNum);
         
         for (int i = 0; i < 500; i++) {
-          while (millis() < next_sample_time) { delay(1); }
+          while (millis() < next_sample_time) { 
+            // Keep polling LoRa in the background to clear TX Done flags for the 1Hz updates
+            if (digitalRead(LORA_INT) == HIGH) {
+              rf95.pollInterrupt();
+            }
+            delay(1); 
+          }
           next_sample_time += 20; 
           
           sensor.read();
-          
           sensors_event_t event; 
           accel.getEvent(&event);
 
-          snprintf(lineBuffer, sizeof(lineBuffer), "%.2f,%.2f,%.2f,%.2f,%.2f\n", 
-                   sensor.getPressure(), sensor.getTemperature(), 
-                   event.acceleration.x, event.acceleration.y, event.acceleration.z);
+          // Calculate absolute acceleration
+          float abs_accel = sqrt((event.acceleration.x * event.acceleration.x) + 
+                                 (event.acceleration.y * event.acceleration.y) + 
+                                 (event.acceleration.z * event.acceleration.z));
           
-          // >>> NEW ADDITION: Send Real-Time Update Every 50 Samples (1 Second at 50Hz) <<<
+          unsigned long timestamp = millis();
+
+          // Format: Timestamp,Pressure,Temperature,AbsoluteAcceleration
+          snprintf(lineBuffer, sizeof(lineBuffer), "%lu,%.2f,%.2f,%.2f\n", 
+                   timestamp, sensor.getPressure(), sensor.getTemperature(), abs_accel);
+          
           if (i % 50 == 0) {
             char rtPacket[80];
-            // Format with an "RT|" prefix so the surface receiver knows to parse it immediately
-            snprintf(rtPacket, sizeof(rtPacket), "RT|%.2f,%.2f,%.2f,%.2f,%.2f", 
-                     sensor.getPressure(), sensor.getTemperature(), 
-                     event.acceleration.x, event.acceleration.y, event.acceleration.z);
-            
-            // Send the packet. We purposely omit waitPacketSent() here to prevent blocking
-            // the 50Hz recording loop while the LoRa radio modulates the signal.
+            snprintf(rtPacket, sizeof(rtPacket), "RT|%lu,%.2f,%.2f,%.2f", 
+                     timestamp, sensor.getPressure(), sensor.getTemperature(), abs_accel);
+            Serial.println(rtPacket);
             rf95.send((uint8_t *)rtPacket, strlen(rtPacket) + 1);
           }
-          // >>> END NEW ADDITION <<<
 
           if (strlen(payload) + strlen(lineBuffer) > 200) {
             dataFile.print(payload);
@@ -229,7 +261,6 @@ void setup() {
          Serial.println("Error opening SD file!");
       }
 
-      // --- PHASE 2: CHUNKED LORA TRANSMISSION ---
       File readFile = SD.open("/burst_log.txt", FILE_READ);
       if (readFile) {
         Serial.println("Transmitting pre-formatted data in chunks...");
@@ -244,7 +275,7 @@ void setup() {
             }
             
             rf95.send((uint8_t *)packet.c_str(), packet.length() + 1);
-            rf95.waitPacketSent();
+            waitLoRaTx(); // Use our non-blocking wait
             
             delay(300); 
           }
@@ -254,10 +285,9 @@ void setup() {
         Serial.println("Bulk transmission complete.");
         
         delay(100);
-        // Fixed syntax error from previous version here
         const char* eofMarker = "EOF"; 
         rf95.send((uint8_t *)eofMarker, strlen(eofMarker) + 1);
-        rf95.waitPacketSent();
+        waitLoRaTx();
       }
     } else {
       Serial.println("SD Card initialization failed!");
@@ -276,19 +306,14 @@ void setup() {
   }
 
   rf95.sleep(); 
-
-  // 5. Go back to deep sleep
   goToSleep();
 }
 
-void loop() {
-  // Empty. The ESP32 never reaches this point.
-}
+void loop() { }
 
 void goToSleep() {
   Serial.println("Entering Deep Sleep...");
   Serial.flush(); 
-  
   esp_sleep_enable_timer_wakeup(SLEEP_DURATION_SECONDS * 1000000ULL);
   esp_deep_sleep_start();
 }
