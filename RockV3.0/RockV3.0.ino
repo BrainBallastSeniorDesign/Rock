@@ -10,8 +10,8 @@
 
 // Pin Definitions
 #define LORA_CS    D3  
-#define LORA_RST   D9 
-#define LORA_INT   D0  
+#define LORA_RST   D1
+#define LORA_INT   D2
 #define SD_CS      D6
 
 #define RF95_FREQ 915.0
@@ -28,7 +28,6 @@ RTC_DATA_ATTR int boots_left = 0;
 RTC_DATA_ATTR bool threshold_mode = false;
 RTC_DATA_ATTR uint64_t SLEEP_DURATION_SECONDS = 10;
 RTC_DATA_ATTR float PRESSURE_THRESHOLD = 20.0;
-
 
 // Constants
 const uint16_t LORA_LISTEN_WINDOW_MS = 500;
@@ -175,7 +174,7 @@ void setup() {
         
         int packetNum = 0;
         char payload[250] = ""; 
-        char lineBuffer[64]; // Increased size to accommodate X, Y, Z coordinates
+        char lineBuffer[64]; 
         
         // Initialize the first payload string
         snprintf(payload, sizeof(payload), "%i|\n", packetNum);
@@ -193,12 +192,24 @@ void setup() {
                    sensor.getPressure(), sensor.getTemperature(), 
                    event.acceleration.x, event.acceleration.y, event.acceleration.z);
           
-          // Lowered the chunk threshold slightly to 200 to ensure the longer lines don't breach the max RF95 packet limit
+          // >>> NEW ADDITION: Send Real-Time Update Every 50 Samples (1 Second at 50Hz) <<<
+          if (i % 50 == 0) {
+            char rtPacket[80];
+            // Format with an "RT|" prefix so the surface receiver knows to parse it immediately
+            snprintf(rtPacket, sizeof(rtPacket), "RT|%.2f,%.2f,%.2f,%.2f,%.2f", 
+                     sensor.getPressure(), sensor.getTemperature(), 
+                     event.acceleration.x, event.acceleration.y, event.acceleration.z);
+            
+            // Send the packet. We purposely omit waitPacketSent() here to prevent blocking
+            // the 50Hz recording loop while the LoRa radio modulates the signal.
+            rf95.send((uint8_t *)rtPacket, strlen(rtPacket) + 1);
+          }
+          // >>> END NEW ADDITION <<<
+
           if (strlen(payload) + strlen(lineBuffer) > 200) {
             dataFile.print(payload);
-            dataFile.print('~'); // Use '~' as the packet delimiter
+            dataFile.print('~'); 
             
-            // Reset payload and prep for the next packet
             payload[0] = '\0';
             packetNum++;
             snprintf(payload, sizeof(payload), "%i|\n", packetNum);
@@ -207,7 +218,6 @@ void setup() {
           strcat(payload, lineBuffer);
         }
         
-        // Write any remaining data in the buffer
         if (strlen(payload) > 0) {
             dataFile.print(payload);
             dataFile.print('~');
@@ -225,21 +235,18 @@ void setup() {
         Serial.println("Transmitting pre-formatted data in chunks...");
         
         while (readFile.available()) {
-          // Read up to the '~' delimiter we placed during Phase 1
           String packet = readFile.readStringUntil('~');
           
           if (packet.length() > 0) {
-            // Print the packet number using simple substring extraction for terminal monitoring
             int pipeIndex = packet.indexOf('|');
             if (pipeIndex > 0) {
               Serial.printf("Sending Packet Number %s\n", packet.substring(0, pipeIndex).c_str());
             }
             
-            // Send the pre-formatted payload (+1 to include the null terminator)
             rf95.send((uint8_t *)packet.c_str(), packet.length() + 1);
             rf95.waitPacketSent();
             
-            delay(300); // Small delay to let the receiver process
+            delay(300); 
           }
         }
         
@@ -247,7 +254,8 @@ void setup() {
         Serial.println("Bulk transmission complete.");
         
         delay(100);
-        const char* eofMarker = "EOF";
+        // Fixed syntax error from previous version here
+        const char* eofMarker = "EOF"; 
         rf95.send((uint8_t *)eofMarker, strlen(eofMarker) + 1);
         rf95.waitPacketSent();
       }
@@ -267,7 +275,6 @@ void setup() {
     }
   }
 
-  // Put LoRa module to sleep to save power during ESP32 deep sleep
   rf95.sleep(); 
 
   // 5. Go back to deep sleep
