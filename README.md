@@ -54,8 +54,8 @@ The following tables detail the connections between the XIAO ESP32C3 and the var
 *   **MISO** ➔ XIAO **D7**
 *   **MOSI** ➔ XIAO **D10**
 *   **NSS / CS** ➔ XIAO **D3**
-*   **RST** ➔ XIAO **D1**
-*   **DIO0 / INT** ➔ XIAO **D2**
+*   **RST** ➔ XIAO **D9**
+*   **DIO0 / INT** ➔ XIAO **D0**
 
 #### 2. MicroSD Card Module (SPI Bus)
 *   **VCC / 3V3** ➔ XIAO **3V3**
