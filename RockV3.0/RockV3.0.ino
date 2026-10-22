@@ -10,8 +10,8 @@
 
 // Pin Definitions
 #define LORA_CS    D3  
-#define LORA_RST   D1 
-#define LORA_INT   D2  
+#define LORA_RST   D9 
+#define LORA_INT   D0  
 #define SD_CS      D6
 
 #define RF95_FREQ 915.0
@@ -29,10 +29,13 @@ RTC_DATA_ATTR bool threshold_mode = false;
 RTC_DATA_ATTR uint64_t SLEEP_DURATION_SECONDS = 10;
 RTC_DATA_ATTR float PRESSURE_THRESHOLD = 20.0;
 
+
 // Constants
 const uint16_t LORA_LISTEN_WINDOW_MS = 500;
 
 void setup() {
+  bool lora_initialized = false;
+
   // Remap SPI bus to not use D9 (Bootload pin)
   SPI.begin(D8, D7, D10, -1);
   
@@ -51,7 +54,6 @@ void setup() {
   bool wake = false;
 
   if(boots_left > 0) {
-    boots_left--;
     if(threshold_mode) { 
       // 2. Initialize ONLY the I2C Bus and the Sensor
       Wire.begin();
@@ -78,11 +80,6 @@ void setup() {
     } else {
       wake = true; 
     }
-    if(boots_left == 0) {
-      bool threshold_mode = false;
-      uint64_t SLEEP_DURATION_SECONDS = 10;
-      float PRESSURE_THRESHOLD = 20.0;
-    }
   } else {
     // 2. Wake and Initialize LoRa FIRST to listen for surface signal
     pinMode(LORA_RST, OUTPUT);
@@ -93,6 +90,7 @@ void setup() {
       Serial.println("LoRa init failed. Going to sleep.");
       goToSleep();
     }
+    lora_initialized = true; // Mark as initialized
     
     rf95.setFrequency(RF95_FREQ);
     rf95.setTxPower(20, false);
@@ -140,6 +138,20 @@ void setup() {
   if (wake) {
     Serial.println("Trigger confirmed! Initializing Sensors...");
 
+    // Initialize LoRa if it wasn't already initialized during the surface listen phase
+    if (!lora_initialized) {
+      pinMode(LORA_RST, OUTPUT);
+      digitalWrite(LORA_RST, LOW); delay(10);
+      digitalWrite(LORA_RST, HIGH); delay(10);
+      
+      if (!rf95.init()) {
+        Serial.println("LoRa init failed during wake up!");
+        goToSleep();
+      }
+      rf95.setFrequency(RF95_FREQ);
+      rf95.setTxPower(20, false);
+    }
+
     Wire.begin();
     if (!sensor.begin(0)) {
       Serial.println("MS5837 initialization failed!");
@@ -158,7 +170,7 @@ void setup() {
       File dataFile = SD.open("/burst_log.txt", FILE_WRITE); 
       
       if (dataFile) {
-        Serial.println("Recording 1500 samples and formatting packets to SD...");
+        Serial.println("Recording 500 samples and formatting packets to SD...");
         unsigned long next_sample_time = millis();
         
         int packetNum = 0;
@@ -169,7 +181,7 @@ void setup() {
         snprintf(payload, sizeof(payload), "%i|\n", packetNum);
         
         for (int i = 0; i < 500; i++) {
-          while (millis() < next_sample_time) { /* Busy wait for 20ms mark */ }
+          while (millis() < next_sample_time) { delay(1); }
           next_sample_time += 20; 
           
           sensor.read();
@@ -243,7 +255,16 @@ void setup() {
       Serial.println("SD Card initialization failed!");
     }
   } else {
-    Serial.println("No signal detected. Going back to sleep.");
+    Serial.println("Not woken, going back to sleep.");
+  }
+
+  if(boots_left > 0) {
+    boots_left--;
+    if(boots_left == 0) {
+      threshold_mode = false;
+      SLEEP_DURATION_SECONDS = 10;
+      PRESSURE_THRESHOLD = 20.0;
+    }
   }
 
   // Put LoRa module to sleep to save power during ESP32 deep sleep
