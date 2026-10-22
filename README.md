@@ -33,8 +33,8 @@ The following tables detail the connections between the XIAO ESP32C3 and the var
 | :--- | :--- | :--- |
 | **3V3** | Power (3.3V) | VCC for LoRa, SD Card, MS5837, and ADXL345 |
 | **GND** | Ground | GND for LoRa, SD Card, MS5837, and ADXL345 |
-| **D0** | Digital Out | LoRa Reset (`LORA_RST`) |
-| **D9** | Hardware Interrupt | LoRa Interrupt / DIO0 (`LORA_INT`) |
+| **D1** | Digital Out | LoRa Reset (`LORA_RST`) |
+| **D2** | Hardware Interrupt | LoRa Interrupt / DIO0 (`LORA_INT`) |
 | **D3** | SPI Chip Select | LoRa Chip Select (`LORA_CS`) |
 | **D4** | I2C SDA | Shared SDA (MS5837 & ADXL345) |
 | **D5** | I2C SCL | Shared SCL (MS5837 & ADXL345) |
@@ -54,8 +54,8 @@ The following tables detail the connections between the XIAO ESP32C3 and the var
 *   **MISO** ➔ XIAO **D7**
 *   **MOSI** ➔ XIAO **D10**
 *   **NSS / CS** ➔ XIAO **D3**
-*   **RST** ➔ XIAO **D9**
-*   **DIO0 / INT** ➔ XIAO **D0**
+*   **RST** ➔ XIAO **D1**
+*   **DIO0 / INT** ➔ XIAO **D2**
 
 #### 2. MicroSD Card Module (SPI Bus)
 *   **VCC / 3V3** ➔ XIAO **3V3**
