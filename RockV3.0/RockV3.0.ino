@@ -16,6 +16,21 @@
 #define SD_CS      D6
 
 #define RF95_FREQ 915.0
+#define MAX_SAMPLES 12
+
+MS5837 sensor;
+Adafruit_ADXL345_Unified accel = Adafruit_ADXL345_Unified(12345);
+
+// RTC memory variables
+RTC_DATA_ATTR int boot_count = 0;
+RTC_DATA_ATTR float last_recorded_pressure = 0.0;
+RTC_DATA_ATTR int boots_left = 0;
+RTC_DATA_ATTR bool threshold_mode = false;
+RTC_DATA_ATTR uint64_t SLEEP_DURATION_SECONDS = 10;
+RTC_DATA_ATTR float PRESSURE_THRESHOLD = 20.0;
+
+// Constants
+const uint16_t LORA_LISTEN_WINDOW_MS = 500;
 
 // 1. Subclass RadioHead to bypass the ESP32 ISR crash
 class RH_RF95_Poll : public RH_RF95 {
@@ -32,19 +47,28 @@ public:
 // 2. Instantiate LoRa with 255 to PREVENT it from attaching a hardware interrupt
 RH_RF95_Poll rf95(LORA_CS, 255); 
 
-MS5837 sensor;
-Adafruit_ADXL345_Unified accel = Adafruit_ADXL345_Unified(12345);
+struct __attribute__((packed)) SensorReading {
+  uint32_t timestamp; 
+  float pressure;
+  float temperature;
+  float abs_accel;
+}; // Total: 16 bytes per sample
 
-// RTC memory variables
-RTC_DATA_ATTR int boot_count = 0;
-RTC_DATA_ATTR float last_recorded_pressure = 0.0;
-RTC_DATA_ATTR int boots_left = 0;
-RTC_DATA_ATTR bool threshold_mode = false;
-RTC_DATA_ATTR uint64_t SLEEP_DURATION_SECONDS = 10;
-RTC_DATA_ATTR float PRESSURE_THRESHOLD = 20.0;
+struct __attribute__((packed)) DataPacket {
+  uint16_t packet_id;
+  uint8_t num_samples;
+  uint8_t checksum;
+  ScaledReading samples[MAX_SAMPLES]; // 192 Bytes
+};
 
-// Constants
-const uint16_t LORA_LISTEN_WINDOW_MS = 500;
+// Simple XOR checksum function
+uint8_t calculateChecksum(uint8_t* data, uint16_t length) {
+  uint8_t crc = 0;
+  for (uint16_t i = 0; i < length; i++) {
+    crc ^= data[i];
+  }
+  return crc;
+}
 
 // 3. Helper to wait for TX without blocking the thread blindly
 void waitLoRaTx() {
